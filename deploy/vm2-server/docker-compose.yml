@@ -1,0 +1,131 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# VM2 — Main Server + messaging infra + TLS proxy  →  https://server.mail-or-a.dev
+#
+#   nginx (TLS) → server (:5000). Also runs:
+#     - kafka      : broker (also serves the whatsapp VM on host :9092)
+#     - zookeeper  : Kafka dependency
+#     - redis      : BullMQ delayed-job scheduling (server-only, not exposed)
+#
+#   MongoDB is MongoDB Atlas (MONGO_URI in server/.env) — NOT self-hosted here.
+#
+#   First-time TLS setup:
+#     cd deploy/vm2-server
+#     DOMAIN=server.mail-or-a.dev EMAIL=you@example.com ../common/init-letsencrypt.sh
+#   Then:
+#     docker compose up -d --build
+#
+#   Only host port that must be reachable off-VM: 9092 (Kafka) from the whatsapp
+#   VM — restrict it to that VM's IP.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: mailora-server-vm
+
+services:
+  # ─── Zookeeper (Kafka dependency) ────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: echo srvr | nc localhost 2181 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── Kafka Broker (dual listener: internal + cross-VM) ───────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      # EXTERNAL listener — the whatsapp VM connects here.
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      # INTERNAL (kafka:29092) is used by the server container on THIS VM.
+      # EXTERNAL is what the whatsapp VM connects to — it MUST be an address that
+      # VM routes to. Defaults to the public domain; prefer the private IP
+      # between VM2↔VM3 and set KAFKA_EXTERNAL_HOST accordingly.
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-server.mail-or-a.dev}:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      # Use the INTERNAL listener (29092). Hitting :9092 makes the broker hand
+      # back its EXTERNAL advertised address (the public domain), which a
+      # container can't reach via the VM's own public IP — so the check hangs
+      # and Kafka is wrongly marked unhealthy.
+      test: kafka-topics --bootstrap-server localhost:29092 --list || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ─── Redis (BullMQ — server-only, not exposed off-VM) ────────────────────
+  redis:
+    image: redis:7.2-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── Main Server ─────────────────────────────────────────────────────────
+  server:
+    build:
+      # server/Dockerfile does `COPY server/...`, so context is the repo root.
+      context: ../..
+      dockerfile: server/Dockerfile
+    expose:
+      - "5000"
+    # Secrets + prod URLs (Atlas, OAuth, S3, WHATSAPP_SERVICE_URL, …) live in
+    # server/.env. Only the on-VM infra addresses are overridden below.
+    env_file:
+      - ../../server/.env
+    environment:
+      - NODE_ENV=production
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── TLS reverse proxy ───────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - server
+    command: /bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g "daemon off;"'
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done'
+    restart: unless-stopped
+
+volumes:
+  redis_data:
