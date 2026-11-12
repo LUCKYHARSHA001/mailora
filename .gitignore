@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment files with sensitive credentials
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+
+# Auth and Session Storage
+.wwebjs_auth/
+**/.wwebjs_auth/
+.wwebjs_cache/
+**/.wwebjs_cache/
+.cache/
+**/.cache/
+
+# Build outputs
+dist/
+build/
+coverage/
+**/dist/
+**/build/
+**/coverage/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS Files
+.DS_Store
+Thumbs.db
+
