@@ -1,0 +1,3 @@
+# Per-VM TLS material — issued at deploy time, never commit.
+*/certbot/conf/
+*/certbot/www/
