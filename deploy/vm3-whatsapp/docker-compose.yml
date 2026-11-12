@@ -1,0 +1,60 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# VM3 — WhatsApp microservice + TLS proxy   →  https://whatsapp.mail-or-a.dev
+#
+#   nginx (TLS) → whatsapp-service (:5002). whatsapp-web.js (Chromium) + Kafka
+#   consumer; connects to Kafka on VM2 (KAFKA_BROKERS in whatsapp-service/.env).
+#
+#   First-time TLS setup:
+#     cd deploy/vm3-whatsapp
+#     DOMAIN=whatsapp.mail-or-a.dev EMAIL=you@example.com ../common/init-letsencrypt.sh
+#   Then:
+#     docker compose up -d --build
+#     docker compose logs -f whatsapp-service   # scan the QR once (one-time)
+#
+#   /health only responds AFTER the QR is scanned, so expect "unhealthy" until
+#   then. The login is persisted in the wa_session volume.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: mailora-whatsapp-vm
+
+services:
+  whatsapp-service:
+    build:
+      context: ../../whatsapp-service
+      dockerfile: Dockerfile
+    expose:
+      - "5002"
+    # KAFKA_BROKERS (VM2), ALLOWED_ORIGINS, PORT live in whatsapp-service/.env.
+    env_file:
+      - ../../whatsapp-service/.env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      # Persist the WhatsApp login so the QR is only scanned once.
+      - wa_session:/app/.wwebjs_auth
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - whatsapp-service
+    command: /bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g "daemon off;"'
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done'
+    restart: unless-stopped
+
+volumes:
+  wa_session:
