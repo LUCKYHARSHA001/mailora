@@ -1,0 +1,47 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# VM1 — Client (React SPA) + TLS reverse proxy   →  https://mail-or-a.dev
+#
+#   nginx (TLS) → client container (SPA served on :80 internally).
+#   The SPA's API URL is baked in at BUILD time from client/.env.
+#
+#   First-time TLS setup (issues the Let's Encrypt cert):
+#     cd deploy/vm1-client
+#     DOMAIN=mail-or-a.dev EMAIL=you@example.com ../common/init-letsencrypt.sh
+#   Then:
+#     docker compose up -d --build
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: mailora-client-vm
+
+services:
+  client:
+    build:
+      context: ../../client
+      dockerfile: Dockerfile
+    expose:
+      - "80"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - client
+    # Reload every 6h so renewed certs are picked up without a restart.
+    command: /bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g "daemon off;"'
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    # Attempt renewal every 12h (no-op until a cert is close to expiry).
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done'
+    restart: unless-stopped
