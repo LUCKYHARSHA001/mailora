@@ -1,0 +1,48 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# VM4 — SerpAPI job-feed microservice + TLS proxy   →  https://jobs.mail-or-a.dev
+#
+#   nginx (TLS) → serpapiservice (:5001). Uses MongoDB Atlas (serpapiservice/.env).
+#   No Kafka. The main server reaches it at https://jobs.mail-or-a.dev/api/jobs.
+#
+#   First-time TLS setup:
+#     cd deploy/vm4-serpapi
+#     DOMAIN=jobs.mail-or-a.dev EMAIL=you@example.com ../common/init-letsencrypt.sh
+#   Then:
+#     docker compose up -d --build
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: mailora-serpapi-vm
+
+services:
+  serpapiservice:
+    build:
+      context: ../../serpapiservice
+      dockerfile: Dockerfile
+    expose:
+      - "5001"
+    # Atlas MONGO_URI, SERPAPI_KEY, PORT=5001 all live here already.
+    env_file:
+      - ../../serpapiservice/.env
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - serpapiservice
+    command: /bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g "daemon off;"'
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done'
+    restart: unless-stopped
