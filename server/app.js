@@ -14,6 +14,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
+const path = require("path");
 const mongoose = require("mongoose");
 const AppError = require("./utils/AppError");
 const logger = require("./utils/logger");
@@ -27,6 +28,7 @@ app.use(helmet());
 app.use(morgan("dev"));
 app.use(cookieParser());
 app.use(express.json({ limit: "10mb" }));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // ─── CORS Configuration ────────────────────────────────────────────────────
 // Origins are loaded from the ALLOWED_ORIGINS env variable (comma-separated)

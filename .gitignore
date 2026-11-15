@@ -16,6 +16,8 @@ node_modules/
 **/.wwebjs_cache/
 .cache/
 **/.cache/
+uploads/
+**/uploads/
 
 # Build outputs
 dist/
