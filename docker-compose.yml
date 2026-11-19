@@ -1,43 +1,89 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Mailora 2.0 — Full Stack Docker Compose
+# Mailora 2.0 — Production & Cloud-Ready Docker Compose
 #
-# Runs all services in a single command:
-#   docker-compose up --build
+# Production Usage (uses managed cloud Atlas, Upstash Redis, Aiven Kafka):
+#   docker compose up -d --build
+#
+# Optional Full Local Stack (runs local Mongo, Redis, Kafka, Zookeeper):
+#   docker compose --profile local-infra up -d --build
 #
 # Services:
-#   - client:           React SPA served via Nginx
-#   - server:           Main Express API + Kafka consumers
-#   - whatsapp-service: WhatsApp messaging microservice
-#   - serpapiservice:   Job search microservice (SerpAPI)
-#   - kafka:            Kafka message broker
-#   - zookeeper:        Kafka dependency
-#   - mongo:            MongoDB database (dev only — use Atlas in production)
-#   - redis:            Redis (BullMQ delayed-job scheduling for reminders)
+#   - client:           React 19 SPA served via Nginx (Port 80) with API reverse proxy
+#   - server:           Main Express API + Kafka consumers + BullMQ workers (Port 5000)
+#   - whatsapp-service: WhatsApp messaging microservice with persistent volume (Port 5002)
+#   - serpapiservice:   Job search microservice (Port 5001)
 # ──────────────────────────────────────────────────────────────────────────────
 
 version: "3.8"
 
 services:
-  # ─── Zookeeper (Kafka dependency) ────────────────────────────────────────
+  # ─── Main Express API Server ─────────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "5000:5000"
+    env_file:
+      - server/.env
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - WHATSAPP_SERVICE_URL=http://whatsapp-service:5002
+      - JOB_SERVICE_URL=http://serpapiservice:5001/api/jobs
+    volumes:
+      - server_uploads:/app/server/uploads
+    restart: unless-stopped
+
+  # ─── Client (React + Nginx with API Proxy) ────────────────────────────────
+  client:
+    build:
+      context: client
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  # ─── WhatsApp Microservice ───────────────────────────────────────────────
+  whatsapp-service:
+    build:
+      context: whatsapp-service
+      dockerfile: Dockerfile
+    ports:
+      - "5002:5002"
+    env_file:
+      - whatsapp-service/.env
+    volumes:
+      - wa_session:/app/.wwebjs_auth
+    restart: unless-stopped
+
+  # ─── SerpAPI Job Search Microservice ─────────────────────────────────────
+  serpapiservice:
+    build:
+      context: serpapiservice
+      dockerfile: Dockerfile
+    ports:
+      - "5001:5001"
+    env_file:
+      - serpapiservice/.env
+    restart: unless-stopped
+
+  # ─── Optional Local Infrastructure (Only with --profile local-infra) ─────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
+    profiles: ["local-infra"]
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
-    healthcheck:
-      test: echo srvr | nc localhost 2181 || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # ─── Kafka Broker ────────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.5.0
+    profiles: ["local-infra"]
     depends_on:
-      zookeeper:
-        condition: service_healthy
+      - zookeeper
     ports:
       - "9092:9092"
     environment:
@@ -48,114 +94,26 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    healthcheck:
-      test: kafka-topics --bootstrap-server localhost:9092 --list || exit 1
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
 
-  # ─── MongoDB (dev only — use Atlas in production) ────────────────────────
   mongo:
     image: mongo:7.0
+    profiles: ["local-infra"]
     ports:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh --quiet || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # ─── Redis (BullMQ delayed-job scheduling for reminders) ─────────────────
   redis:
     image: redis:7.2-alpine
-    # AOF persistence so scheduled (delayed) reminder jobs survive a restart.
+    profiles: ["local-infra"]
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ─── Main Server ────────────────────────────────────────────────────────
-  server:
-    build:
-      context: .
-      dockerfile: server/Dockerfile
-    ports:
-      - "5000:5000"
-    depends_on:
-      kafka:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    env_file:
-      - server/.env
-    environment:
-      - KAFKA_BROKERS=kafka:29092
-      - MONGO_URI=mongodb://mongo:27017/mailora
-      - REDIS_URL=redis://redis:6379
-      - WHATSAPP_SERVICE_URL=http://whatsapp-service:5002
-      - JOB_SERVICE_URL=http://serpapiservice:5001/api/jobs
-      - NODE_ENV=development
-      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost:80
-    restart: unless-stopped
-
-  # ─── Client (React + Nginx) ─────────────────────────────────────────────
-  client:
-    build:
-      context: client
-      dockerfile: Dockerfile
-    ports:
-      - "80:80"
-    depends_on:
-      - server
-    environment:
-      - NODE_ENV=production
-    restart: unless-stopped
-
-  # ─── WhatsApp Microservice ──────────────────────────────────────────────
-  whatsapp-service:
-    build:
-      context: whatsapp-service
-      dockerfile: Dockerfile
-    ports:
-      - "5002:5002"
-    depends_on:
-      kafka:
-        condition: service_healthy
-    env_file:
-      - whatsapp-service/.env
-    environment:
-      - KAFKA_BROKERS=kafka:29092
-      - NODE_ENV=development
-    restart: unless-stopped
-
-  # ─── SerpAPI Job Search Microservice ────────────────────────────────────
-  serpapiservice:
-    build:
-      context: serpapiservice
-      dockerfile: Dockerfile
-    ports:
-      - "5001:5001"
-    depends_on:
-      kafka:
-        condition: service_healthy
-    env_file:
-      - serpapiservice/.env
-    environment:
-      - KAFKA_BROKERS=kafka:29092
-      - NODE_ENV=development
-    restart: unless-stopped
 
 volumes:
+  server_uploads:
+  wa_session:
   mongo_data:
   redis_data:
